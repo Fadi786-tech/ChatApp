@@ -12,10 +12,14 @@ const LoginPage = ({ onLogin }) => {
         setLoading(true);
         setError('');
         try {
+            console.log('Attempting login with:', { email, password: '***' });
             const data = await loginUser(email, password);
+            console.log('Login successful:', data);
             onLogin(data);
         } catch (err) {
-            setError('Login failed. Check credentials.');
+            console.error('Login error:', err);
+            const errorMessage = err.response?.data?.error || err.message || 'Login failed. Check credentials.';
+            setError(errorMessage);
         } finally {
             setLoading(false);
         }
