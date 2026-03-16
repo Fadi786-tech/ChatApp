@@ -18,7 +18,7 @@ const wss = new WebSocket.Server({ server });
 
 app.use(cors({
     origin: process.env.NODE_ENV === 'production' 
-        ? ['https://your-frontend-domain.vercel.app'] // Update this with your actual frontend domain
+        ? (process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : true) // Allow all origins if FRONTEND_URL not set
         : ['http://localhost:5173', 'http://localhost:3000'],
     credentials: true
 }));
@@ -28,6 +28,24 @@ app.use(express.json());
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('MongoDB connected'))
     .catch(err => console.error('MongoDB connection error:', err));
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'Server is running', 
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development'
+    });
+});
+
+// Health check for API
+app.get('/api', (req, res) => {
+    res.json({ 
+        status: 'API is running', 
+        timestamp: new Date().toISOString(),
+        endpoints: ['/api/auth/login', '/api/chats', '/api/chats/:chatId/messages']
+    });
+});
 
 // --- HTTP Endpoints ---
 
