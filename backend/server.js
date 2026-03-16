@@ -2,8 +2,6 @@ const dotenv = require('dotenv');
 dotenv.config();
 const express = require('express');
 const mongoose = require('mongoose');
-const http = require('http');
-const WebSocket = require('ws');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
@@ -13,38 +11,67 @@ const Chat = require('./models/Chat');
 const Message = require('./models/Message');
 
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
 
+// CORS configuration for Vercel
 app.use(cors({
-    origin: process.env.NODE_ENV === 'production' 
-        ? (process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : true) // Allow all origins if FRONTEND_URL not set
-        : ['http://localhost:5173', 'http://localhost:3000'],
-    credentials: true
+    origin: true, // Allow all origins for now to debug
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json());
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log('MongoDB connected'))
-    .catch(err => console.error('MongoDB connection error:', err));
+let isConnected = false;
+const connectDB = async () => {
+    if (isConnected) return;
+    
+    try {
+        await mongoose.connect(process.env.MONGO_URI);
+        isConnected = true;
+        console.log('MongoDB connected');
+    } catch (err) {
+        console.error('MongoDB connection error:', err);
+        throw err;
+    }
+};
 
 // Health check endpoint
-app.get('/', (req, res) => {
-    res.json({ 
-        status: 'Server is running', 
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
-    });
+app.get('/', async (req, res) => {
+    try {
+        await connectDB();
+        res.json({ 
+            status: 'Server is running', 
+            timestamp: new Date().toISOString(),
+            environment: process.env.NODE_ENV || 'development',
+            mongodb: isConnected ? 'connected' : 'disconnected'
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'Server error', 
+            error: error.message,
+            mongodb: 'connection failed'
+        });
+    }
 });
 
 // Health check for API
-app.get('/api', (req, res) => {
-    res.json({ 
-        status: 'API is running', 
-        timestamp: new Date().toISOString(),
-        endpoints: ['/api/auth/login', '/api/chats', '/api/chats/:chatId/messages']
-    });
+app.get('/api', async (req, res) => {
+    try {
+        await connectDB();
+        res.json({ 
+            status: 'API is running', 
+            timestamp: new Date().toISOString(),
+            endpoints: ['/api/auth/login', '/api/chats', '/api/chats/:chatId/messages'],
+            mongodb: isConnected ? 'connected' : 'disconnected'
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'API error', 
+            error: error.message 
+        });
+    }
 });
 
 // --- HTTP Endpoints ---
@@ -52,10 +79,17 @@ app.get('/api', (req, res) => {
 // Login or Register
 app.post('/api/auth/login', async (req, res) => {
     try {
+        await connectDB();
+        
         const { email, password } = req.body;
+        
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password are required' });
+        }
+        
         let user = await User.findOne({ email });
 
-        // ye demo k liye is liye agr user exist nahi karta toh ye unhi credentials se aik user create kr dega aur login kr dega
+        // Create user if doesn't exist (demo feature)
         if (!user) {
             const passwordHash = await bcrypt.hash(password, 10);
             user = new User({
@@ -65,6 +99,7 @@ app.post('/api/auth/login', async (req, res) => {
                 avatarUrl: `https://ui-avatars.com/api/?name=${email.substring(0, 2)}`
             });
             await user.save();
+            console.log('New user created:', email);
         } else {
             const match = await bcrypt.compare(password, user.passwordHash);
             if (!match) return res.status(401).json({ error: 'Invalid credentials' });
@@ -74,20 +109,27 @@ app.post('/api/auth/login', async (req, res) => {
         user.status = 'online';
         await user.save();
 
-        const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN });
+        const token = jwt.sign(
+            { userId: user._id, username: user.username }, 
+            process.env.JWT_SECRET || 'fallback-secret', 
+            { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+        );
+        
         res.json({ token, user });
     } catch (error) {
         console.error('Login error:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Internal server error: ' + error.message });
     }
 });
 
 // Create Chat (Helper)
 app.post('/api/chats', async (req, res) => {
     try {
+        await connectDB();
+        
         const { participantIds, name, isGroup } = req.body;
 
-        // ye kary ga k group chat exist krti ha ya nahi agr exist krti hai toh naye participants add kr k update karta ha
+        // Check if group chat exists and update participants
         if (isGroup && name) {
             let chat = await Chat.findOne({ name, isGroup: true });
             if (chat) {
@@ -111,13 +153,15 @@ app.post('/api/chats', async (req, res) => {
         res.json(chat);
     } catch (error) {
         console.error('Create Chat error:', error);
-        res.status(500).json({ error: 'Failed to create chat' });
+        res.status(500).json({ error: 'Failed to create chat: ' + error.message });
     }
 });
 
 // Get Messages
 app.get('/api/chats/:chatId/messages', async (req, res) => {
     try {
+        await connectDB();
+        
         const { chatId } = req.params;
         const { limit = 50, before } = req.query;
 
@@ -139,150 +183,9 @@ app.get('/api/chats/:chatId/messages', async (req, res) => {
         res.json(messages);
     } catch (error) {
         console.error('Get Messages error:', error);
-        res.status(500).json({ error: 'Failed to fetch messages' });
+        res.status(500).json({ error: 'Failed to fetch messages: ' + error.message });
     }
 });
 
-// --- WebSocket Server ---
-
-// Map: ChatID -> Set of WebSocket clients
-const rooms = new Map();
-
-function broadcastToRoom(chatId, data) {
-    const clients = rooms.get(chatId.toString());
-    if (clients) {
-        const messageStr = JSON.stringify(data);
-        clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(messageStr);
-            }
-        });
-    }
-}
-
-wss.on('connection', (ws) => {
-    ws.isAlive = true;
-    ws.user = null; // Authenticated user
-
-    ws.on('message', async (messageRaw) => {
-        try {
-            const messageData = JSON.parse(messageRaw);
-            const { type, payload } = messageData;
-
-            switch (type) {
-                case 'AUTH':
-                    try {
-                        const decoded = jwt.verify(payload.token, process.env.JWT_SECRET || 'secret789');
-                        ws.user = decoded;
-                        ws.send(JSON.stringify({ type: 'AUTH_SUCCESS', payload: { userId: decoded.userId } }));
-
-                        // Mark user online in DB
-                        await User.findByIdAndUpdate(decoded.userId, { status: 'online' });
-                    } catch (err) {
-                        ws.send(JSON.stringify({ type: 'AUTH_ERROR', error: 'Invalid Token' }));
-                        ws.close();
-                    }
-                    break;
-
-                case 'JOIN_ROOM':
-                    if (!ws.user) return; // Must be auth
-                    const { chatId } = payload;
-                    if (!rooms.has(chatId)) {
-                        rooms.set(chatId, new Set());
-                    }
-                    rooms.get(chatId).add(ws);
-                    ws.currentChatId = chatId;
-                    break;
-
-                case 'LEAVE_ROOM':
-                    if (ws.currentChatId && rooms.has(ws.currentChatId)) {
-                        rooms.get(ws.currentChatId).delete(ws);
-                    }
-                    break;
-
-                case 'NEW_MESSAGE':
-                    if (!ws.user) return;
-                    const { chatId: msgChatId, content } = payload;
-
-                    // Save to DB
-                    const newMessage = new Message({
-                        chatId: msgChatId,
-                        senderId: ws.user.userId,
-                        content,
-                        timestamp: new Date()
-                    });
-                    const savedMsg = await newMessage.save();
-                    // Populate sender info for clients
-                    await savedMsg.populate('senderId', 'username avatarUrl');
-
-                    // Update Chat
-                    await Chat.findByIdAndUpdate(msgChatId, {
-                        lastMessage: savedMsg._id,
-                        updatedAt: savedMsg.timestamp
-                    });
-
-                    // Broadcast
-                    broadcastToRoom(msgChatId, {
-                        type: 'NEW_MESSAGE',
-                        payload: savedMsg
-                    });
-                    break;
-
-                // --- WebRTC Signaling ---
-                case 'JOIN_CALL':
-                case 'VIDEO_OFFER':
-                case 'VIDEO_ANSWER':
-                case 'ICE_CANDIDATE':
-                case 'VIDEO_CALL_ENDED':
-                    if (!ws.user) return;
-                    const { chatId: signalChatId, ...signalData } = payload;
-                    // Broadcast to others in the room
-                    const roomClients = rooms.get(signalChatId);
-                    if (roomClients) {
-                        roomClients.forEach(client => {
-                            if (client !== ws && client.readyState === WebSocket.OPEN) {
-                                client.send(JSON.stringify({
-                                    type: type, // Preserves VIDEO_OFFER, etc.
-                                    payload: {
-                                        ...signalData,
-                                        senderId: ws.user.userId
-                                    }
-                                }));
-                            }
-                        });
-                    }
-                    else {
-                        // console.log("No room clients found for chat", signalChatId);
-                    }
-                    break;
-
-                default:
-                    console.warn('Unknown message type:', type);
-            }
-        } catch (err) {
-            console.error('WS Error:', err);
-        }
-    });
-
-    ws.on('close', async () => {
-        if (ws.currentChatId && rooms.has(ws.currentChatId)) {
-            // If user disconnects (closes tab), ensure call ends for others in room
-            broadcastToRoom(ws.currentChatId, {
-                type: 'VIDEO_CALL_ENDED',
-                payload: { chatId: ws.currentChatId }
-            });
-
-            rooms.get(ws.currentChatId).delete(ws);
-        }
-        if (ws.user) {
-            // Mark offline
-            await User.findByIdAndUpdate(ws.user.userId, { status: 'offline', lastActive: new Date() });
-        }
-    });
-});
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log('Server v2 (Multi-User Support) Started'); // Marker log
-});
+// Export for Vercel
+module.exports = app;
